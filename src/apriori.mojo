@@ -1,11 +1,10 @@
 """Batched support-counting kernels for Apriori itemset mining."""
 
-from std.algorithm import parallelize
 from std.bit import pop_count
 from std.sys.info import simd_width_of
 
-comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
-comptime U64Ptr = UnsafePointer[UInt64, AnyOrigin[mut=True]]
+comptime I64Ptr = Pointer[Int64, AnyOrigin[mut=True]]
+comptime U64Ptr = Pointer[UInt64, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.uint64]()
 
 
@@ -28,67 +27,80 @@ def count_bitmap_range(
 ):
     if candidate_length == 1:
         for candidate_index in range(start, stop):
-            var item = Int(candidates[candidate_index])
+            var item = Int(candidates[unsafe_offset=candidate_index])
             var total = 0
             var word = 0
             while word + W <= words:
                 total += Int(
                     pop_count(
-                        bitmaps.load[width=W](item * words + word)
+                        bitmaps.unsafe_load[width=W](item * words + word)
                     ).reduce_add()
                 )
                 word += W
             while word < words:
-                total += Int(pop_count(bitmaps[item * words + word]))
+                total += Int(
+                    pop_count(bitmaps[unsafe_offset=item * words + word])
+                )
                 word += 1
-            counts[candidate_index] = Int64(total)
+            counts[unsafe_offset=candidate_index] = Int64(total)
         return
 
     if candidate_length == 2:
         for candidate_index in range(start, stop):
             var candidate_offset = candidate_index * 2
-            var first_offset = Int(candidates[candidate_offset]) * words
-            var second_offset = Int(candidates[candidate_offset + 1]) * words
+            var first_offset = (
+                Int(candidates[unsafe_offset=candidate_offset]) * words
+            )
+            var second_offset = (
+                Int(candidates[unsafe_offset=candidate_offset + 1]) * words
+            )
             var total = 0
             var word = 0
             while word + W <= words:
-                var intersection = (
-                    bitmaps.load[width=W](first_offset + word)
-                    & bitmaps.load[width=W](second_offset + word)
-                )
+                var intersection = bitmaps.unsafe_load[width=W](
+                    first_offset + word
+                ) & bitmaps.unsafe_load[width=W](second_offset + word)
                 total += Int(pop_count(intersection).reduce_add())
                 word += W
             while word < words:
                 total += Int(
                     pop_count(
-                        bitmaps[first_offset + word]
-                        & bitmaps[second_offset + word]
+                        bitmaps[unsafe_offset=first_offset + word]
+                        & bitmaps[unsafe_offset=second_offset + word]
                     )
                 )
                 word += 1
-            counts[candidate_index] = Int64(total)
+            counts[unsafe_offset=candidate_index] = Int64(total)
         return
 
     for candidate_index in range(start, stop):
         var candidate_offset = candidate_index * candidate_length
-        var first_item = Int(candidates[candidate_offset])
+        var first_item = Int(candidates[unsafe_offset=candidate_offset])
         var total = 0
         var word = 0
         while word + W <= words:
-            var intersection = bitmaps.load[width=W](first_item * words + word)
+            var intersection = bitmaps.unsafe_load[width=W](
+                first_item * words + word
+            )
             for item_index in range(1, candidate_length):
-                var item = Int(candidates[candidate_offset + item_index])
-                intersection &= bitmaps.load[width=W](item * words + word)
+                var item = Int(
+                    candidates[unsafe_offset=candidate_offset + item_index]
+                )
+                intersection &= bitmaps.unsafe_load[width=W](
+                    item * words + word
+                )
             total += Int(pop_count(intersection).reduce_add())
             word += W
         while word < words:
-            var intersection = bitmaps[first_item * words + word]
+            var intersection = bitmaps[unsafe_offset=first_item * words + word]
             for item_index in range(1, candidate_length):
-                var item = Int(candidates[candidate_offset + item_index])
-                intersection &= bitmaps[item * words + word]
+                var item = Int(
+                    candidates[unsafe_offset=candidate_offset + item_index]
+                )
+                intersection &= bitmaps[unsafe_offset=item * words + word]
             total += Int(pop_count(intersection))
             word += 1
-        counts[candidate_index] = Int64(total)
+        counts[unsafe_offset=candidate_index] = Int64(total)
 
 
 def contains_tid(tids: I64Ptr, start: Int, stop: Int, target: Int64) -> Bool:
@@ -96,11 +108,11 @@ def contains_tid(tids: I64Ptr, start: Int, stop: Int, target: Int64) -> Bool:
     var hi = stop
     while lo < hi:
         var mid = lo + (hi - lo) // 2
-        if tids[mid] < target:
+        if tids[unsafe_offset=mid] < target:
             lo = mid + 1
         else:
             hi = mid
-    return lo < stop and tids[lo] == target
+    return lo < stop and tids[unsafe_offset=lo] == target
 
 
 def count_sparse_range(
@@ -115,37 +127,46 @@ def count_sparse_range(
     for candidate_index in range(start, stop):
         var candidate_offset = candidate_index * candidate_length
         var pivot_position = 0
-        var pivot_item = Int(candidates[candidate_offset])
-        var pivot_size = Int(offsets[pivot_item + 1] - offsets[pivot_item])
+        var pivot_item = Int(candidates[unsafe_offset=candidate_offset])
+        var pivot_size = Int(
+            offsets[unsafe_offset=pivot_item + 1]
+            - offsets[unsafe_offset=pivot_item]
+        )
         for position in range(1, candidate_length):
-            var item = Int(candidates[candidate_offset + position])
-            var item_size = Int(offsets[item + 1] - offsets[item])
+            var item = Int(
+                candidates[unsafe_offset=candidate_offset + position]
+            )
+            var item_size = Int(
+                offsets[unsafe_offset=item + 1] - offsets[unsafe_offset=item]
+            )
             if item_size < pivot_size:
                 pivot_position = position
                 pivot_item = item
                 pivot_size = item_size
 
         var total = 0
-        var pivot_start = Int(offsets[pivot_item])
-        var pivot_stop = Int(offsets[pivot_item + 1])
+        var pivot_start = Int(offsets[unsafe_offset=pivot_item])
+        var pivot_stop = Int(offsets[unsafe_offset=pivot_item + 1])
         for tid_index in range(pivot_start, pivot_stop):
-            var tid = tids[tid_index]
+            var tid = tids[unsafe_offset=tid_index]
             var present = True
             for position in range(candidate_length):
                 if position == pivot_position:
                     continue
-                var item = Int(candidates[candidate_offset + position])
+                var item = Int(
+                    candidates[unsafe_offset=candidate_offset + position]
+                )
                 if not contains_tid(
                     tids,
-                    Int(offsets[item]),
-                    Int(offsets[item + 1]),
+                    Int(offsets[unsafe_offset=item]),
+                    Int(offsets[unsafe_offset=item + 1]),
                     tid,
                 ):
                     present = False
                     break
             if present:
                 total += 1
-        counts[candidate_index] = Int64(total)
+        counts[unsafe_offset=candidate_index] = Int64(total)
 
 
 @export("map_build_bitmaps")
@@ -160,11 +181,16 @@ def map_build_bitmaps(
     var offsets = i64p(offsets_addr)
     var bitmaps = u64p(bitmaps_addr)
     for item in range(item_count):
-        for position in range(Int(offsets[item]), Int(offsets[item + 1])):
-            var transaction = Int(tids[position])
+        for position in range(
+            Int(offsets[unsafe_offset=item]),
+            Int(offsets[unsafe_offset=item + 1]),
+        ):
+            var transaction = Int(tids[unsafe_offset=position])
             var word = transaction // 64
             var bit = transaction % 64
-            bitmaps[item * words + word] |= UInt64(1) << UInt64(bit)
+            bitmaps[unsafe_offset=item * words + word] |= UInt64(1) << UInt64(
+                bit
+            )
 
 
 @export("map_count_bitmap")
@@ -179,36 +205,15 @@ def map_count_bitmap(
     var candidates = i64p(candidates_addr)
     var bitmaps = u64p(bitmaps_addr)
     var counts = i64p(counts_addr)
-    if candidate_count < 256:
-        count_bitmap_range(
-            candidates,
-            candidate_length,
-            bitmaps,
-            words,
-            counts,
-            0,
-            candidate_count,
-        )
-        return
-
-    var tasks = min(candidate_count, 16)
-    var chunk = (candidate_count + tasks - 1) // tasks
-
-    @parameter
-    def work(task: Int):
-        var start = task * chunk
-        var stop = min(start + chunk, candidate_count)
-        count_bitmap_range(
-            candidates,
-            candidate_length,
-            bitmaps,
-            words,
-            counts,
-            start,
-            stop,
-        )
-
-    parallelize[work](tasks, tasks)
+    count_bitmap_range(
+        candidates,
+        candidate_length,
+        bitmaps,
+        words,
+        counts,
+        0,
+        candidate_count,
+    )
 
 
 @export("map_count_sparse")
@@ -224,33 +229,12 @@ def map_count_sparse(
     var tids = i64p(tids_addr)
     var offsets = i64p(offsets_addr)
     var counts = i64p(counts_addr)
-    if candidate_count < 256:
-        count_sparse_range(
-            candidates,
-            candidate_length,
-            tids,
-            offsets,
-            counts,
-            0,
-            candidate_count,
-        )
-        return
-
-    var tasks = min(candidate_count, 16)
-    var chunk = (candidate_count + tasks - 1) // tasks
-
-    @parameter
-    def work(task: Int):
-        var start = task * chunk
-        var stop = min(start + chunk, candidate_count)
-        count_sparse_range(
-            candidates,
-            candidate_length,
-            tids,
-            offsets,
-            counts,
-            start,
-            stop,
-        )
-
-    parallelize[work](tasks, tasks)
+    count_sparse_range(
+        candidates,
+        candidate_length,
+        tids,
+        offsets,
+        counts,
+        0,
+        candidate_count,
+    )
