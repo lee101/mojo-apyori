@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import apyori
+import apyori._lib as native_lib
 from apyori._lib import count_bitmap
 from apyori import (
     OrderedStatistic,
@@ -359,7 +360,7 @@ def test_sparse_kernel_path_matches_upstream(monkeypatch):
     parity(rows, min_support=0.02, max_length=3)
 
 
-def test_bitmap_simd_tail_at_serial_parallel_boundary():
+def test_bitmap_simd_tail():
     row_sets = [
         frozenset(
             item
@@ -390,6 +391,53 @@ def test_bitmap_simd_tail_at_serial_parallel_boundary():
             manager._count_candidates(candidates, length),
             expected,
         )
+
+
+def test_singletons_skip_native_index_allocation():
+    rows = [[0, 1], [0], [1, 2], [0, 2], []]
+    manager = TransactionManager(rows)
+    candidates = manager.initial_candidates()
+    np.testing.assert_array_equal(
+        manager._count_candidates(candidates, 1),
+        np.array([3, 2, 2], dtype=np.int64),
+    )
+    assert manager._native_cache is None
+
+
+def test_bitmap_parallel_threshold_keeps_small_work_serial(monkeypatch):
+    candidates = np.array([0, 1, 0, 1], dtype=np.int64)
+    bitmaps = np.full((2, 1), np.iinfo(np.uint64).max, dtype=np.uint64)
+    counts = np.empty(2, dtype=np.int64)
+
+    def unexpected_pool():
+        raise AssertionError("small native count used the thread pool")
+
+    monkeypatch.setattr(native_lib, "_PARALLEL_BITMAP_WORK", 5)
+    monkeypatch.setattr(native_lib, "_PARALLEL_CANDIDATES", 2)
+    monkeypatch.setattr(native_lib, "_pool", unexpected_pool)
+    native_lib.count_bitmap(candidates, 2, 2, bitmaps, 1, counts)
+    np.testing.assert_array_equal(counts, np.array([64, 64]))
+
+
+def test_bitmap_parallel_threshold_splits_large_work(monkeypatch):
+    candidates = np.array([0, 1, 0, 1], dtype=np.int64)
+    bitmaps = np.full((2, 1), np.iinfo(np.uint64).max, dtype=np.uint64)
+    counts = np.empty(2, dtype=np.int64)
+    calls = []
+
+    class Pool:
+        def map(self, function, parts):
+            parts = list(parts)
+            calls.extend(parts)
+            return map(function, parts)
+
+    monkeypatch.setattr(native_lib, "_PARALLEL_BITMAP_WORK", 4)
+    monkeypatch.setattr(native_lib, "_PARALLEL_CANDIDATES", 2)
+    monkeypatch.setattr(native_lib, "_PARALLEL_WORKERS", 2)
+    monkeypatch.setattr(native_lib, "_pool", Pool)
+    native_lib.count_bitmap(candidates, 2, 2, bitmaps, 1, counts)
+    np.testing.assert_array_equal(counts, np.array([64, 64]))
+    assert calls == [(0, 1), (1, 2)]
 
 
 def test_native_support_cache_is_invalidated_by_added_transaction():

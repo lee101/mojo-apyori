@@ -144,6 +144,15 @@ class TransactionManager:
     def _count_candidates(self, candidates, length):
         if not candidates:
             return np.empty(0, dtype=np.int64)
+        if length == 1:
+            return np.fromiter(
+                (
+                    len(self.__transaction_index_map[next(iter(candidate))])
+                    for candidate in candidates
+                ),
+                dtype=np.int64,
+                count=len(candidates),
+            )
         codes, tids, offsets, bitmaps, words = self._native_index()
         encoded = np.fromiter(
             (codes[item] for candidate in candidates for item in candidate),

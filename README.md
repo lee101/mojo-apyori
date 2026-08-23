@@ -78,13 +78,17 @@ Measured on an Intel Xeon E5-2697 v4 at 2.30 GHz (72 logical CPUs):
 
 | workload | mojo-apyori | upstream apyori 1.1.2 | result |
 | --- | ---: | ---: | ---: |
-| 25k baskets, 48 items, width 10, max length 3 | 220.7 ms | 4524.5 ms | 20.50x faster |
-| 60k baskets, 100 items, width 5, max length 2 | 209.0 ms | 1238.7 ms | 5.93x faster |
+| 250 baskets, 24 items, width 4, max length 2 | 2.3 ms | 2.6 ms | 1.13x faster |
+| 10k baskets, 8 items, width 2, max length 1 | 3.7 ms | 4.3 ms | 1.16x faster |
+| 25k baskets, 48 items, width 10, max length 3 | 160.8 ms | 4075.4 ms | 25.34x faster |
+| 60k baskets, 100 items, width 5, max length 2 | 169.9 ms | 998.4 ms | 5.88x faster |
 
-The first workload reaches a large three-item candidate level, so SIMD bitmap
-intersection dominates and Mojo wins decisively. The shallower workload has a
-smaller gain because Python-side transaction ingestion and result construction
-make up more of the total time.
+Singleton support uses membership cardinalities directly and does not build a
+native index. This removes the allocation overhead that previously made the
+10k-row singleton workload slower than upstream. The larger three-item workload
+is dominated by SIMD bitmap intersection and wins decisively. Python-side
+transaction ingestion and result construction account for most of the smaller
+workloads.
 
 ## How it works
 
@@ -101,11 +105,13 @@ addresses and are reconstructed as
 The native index is vertical: each item owns an `int64` transaction-ID segment.
 When an item-by-transaction bitmap needs no more than 256 MiB, Mojo materializes
 contiguous `uint64` rows and counts candidates with SIMD AND and
-population-count operations, parallelized across candidates. Larger sparse
-problems keep sorted segments in the compact vertical layout and use a
-shortest-list, binary-intersection kernel instead. All arrays and native output
-storage are allocated and owned by NumPy; Mojo allocates nothing across the FFI
-boundary.
+population-count operations. Large independent candidate batches are divided
+into zero-copy contiguous views and counted by up to eight concurrent native
+calls; explicit work thresholds keep smaller bitmap and sparse batches serial.
+Larger sparse problems keep sorted segments in the compact vertical layout and
+use a shortest-list, binary-intersection kernel instead. All arrays and native
+output storage are allocated and owned by NumPy; Mojo allocates nothing across
+the FFI boundary.
 Supports produced by native counting are reused during association-rule
 generation instead of recomputing the same itemset intersections in Python.
 

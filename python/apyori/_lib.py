@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,10 @@ LIB = Path(
 )
 I = ctypes.c_int64
 _I64_MAX = np.iinfo(np.int64).max
+_PARALLEL_CANDIDATES = 256
+_PARALLEL_BITMAP_WORK = 1 << 17
+_PARALLEL_SPARSE_WORK = 1 << 20
+_PARALLEL_WORKERS = min(8, os.cpu_count() or 1)
 
 _SIGNATURES = {
     "map_build_bitmaps": ([I] * 5, None),
@@ -22,6 +27,7 @@ _SIGNATURES = {
 }
 
 _library: ctypes.CDLL | None = None
+_executor: ThreadPoolExecutor | None = None
 
 
 def lib() -> ctypes.CDLL:
@@ -35,6 +41,22 @@ def lib() -> ctypes.CDLL:
             function.argtypes = argtypes
             function.restype = restype
     return _library
+
+
+def _pool() -> ThreadPoolExecutor:
+    global _executor
+    if _executor is None:
+        _executor = ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS)
+    return _executor
+
+
+def _ranges(size: int) -> list[tuple[int, int]]:
+    workers = min(_PARALLEL_WORKERS, size)
+    chunk = (size + workers - 1) // workers
+    return [
+        (start, min(start + chunk, size))
+        for start in range(0, size, chunk)
+    ]
 
 
 def _array(
@@ -134,14 +156,35 @@ def count_bitmap(
     item_count = bitmaps.size // words
     if np.any(candidates < 0) or np.any(candidates >= item_count):
         raise ValueError("candidate item ID exceeds the bitmap bounds")
-    lib().map_count_bitmap(
-        addr(candidates),
-        candidate_count,
-        candidate_length,
-        addr(bitmaps),
-        words,
-        addr(counts),
-    )
+    function = lib().map_count_bitmap
+    work = candidate_count * candidate_length * words
+    if (
+        candidate_count < _PARALLEL_CANDIDATES
+        or work < _PARALLEL_BITMAP_WORK
+        or _PARALLEL_WORKERS == 1
+    ):
+        function(
+            addr(candidates),
+            candidate_count,
+            candidate_length,
+            addr(bitmaps),
+            words,
+            addr(counts),
+        )
+        return
+
+    def run(part):
+        start, stop = part
+        function(
+            addr(candidates[start * candidate_length :]),
+            stop - start,
+            candidate_length,
+            addr(bitmaps),
+            words,
+            addr(counts[start:]),
+        )
+
+    list(_pool().map(run, _ranges(candidate_count)))
 
 
 def count_sparse(
@@ -175,11 +218,32 @@ def count_sparse(
     item_count = offsets.size - 1
     if np.any(candidates < 0) or np.any(candidates >= item_count):
         raise ValueError("candidate item ID exceeds the sparse index bounds")
-    lib().map_count_sparse(
-        addr(candidates),
-        candidate_count,
-        candidate_length,
-        addr(tids),
-        addr(offsets),
-        addr(counts),
-    )
+    function = lib().map_count_sparse
+    work = candidate_count * candidate_length * tids.size
+    if (
+        candidate_count < _PARALLEL_CANDIDATES
+        or work < _PARALLEL_SPARSE_WORK
+        or _PARALLEL_WORKERS == 1
+    ):
+        function(
+            addr(candidates),
+            candidate_count,
+            candidate_length,
+            addr(tids),
+            addr(offsets),
+            addr(counts),
+        )
+        return
+
+    def run(part):
+        start, stop = part
+        function(
+            addr(candidates[start * candidate_length :]),
+            stop - start,
+            candidate_length,
+            addr(tids),
+            addr(offsets),
+            addr(counts[start:]),
+        )
+
+    list(_pool().map(run, _ranges(candidate_count)))

@@ -68,6 +68,16 @@ def machine():
 def main():
     cases = [
         (
+            "250 baskets, 24 items, width 4, max 2",
+            transactions(0, 250, 24, 4),
+            {"min_support": 0.02, "max_length": 2},
+        ),
+        (
+            "10k baskets, 8 items, width 2, max 1",
+            transactions(3, 10_000, 8, 2),
+            {"min_support": 0.02, "max_length": 1},
+        ),
+        (
             "25k baskets, 48 items, width 10, max 3",
             transactions(1, 25_000, 48, 10),
             {"min_support": 0.02, "max_length": 3},
